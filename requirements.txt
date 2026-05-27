@@ -2,4 +2,120 @@ streamlit
 plotly
 numpy
 pandas
+import streamlit as st
+import plotly.graph_objects as go
+import numpy as np
+import pandas as pd
+import math
+from dataclasses import dataclass
+from typing import List, Optional, Dict, Any
+
+st.set_page_config(page_title="MTR System", layout="wide", initial_sidebar_state="expanded", page_icon="📊")
+
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;800&family=IBM+Plex+Mono:wght@400;500&display=swap');
+html, body, [class*="css"] { font-family: 'IBM Plex Mono', monospace; background-color: #0d0f14; color: #c8cdd8; }
+.stApp { background: #0d0f14; }
+.mtr-header { display: flex; align-items: center; gap: 18px; padding: 18px 28px 14px; border-bottom: 1px solid #1e2330; }
+.mtr-logo-box { width: 44px; height: 44px; background: linear-gradient(135deg, #00e5a0 0%, #00b4d8 100%); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: 'Syne', sans-serif; font-weight: 800; font-size: 18px; color: #0d0f14; }
+.mtr-title { font-family: 'Syne', sans-serif; font-weight: 800; font-size: 26px; letter-spacing: 0.12em; color: #e8ecf4; margin: 0; }
+.mtr-subtitle { font-size: 11px; letter-spacing: 0.18em; color: #4a5168; text-transform: uppercase; }
+.stat-row { display:flex; gap:12px; padding:12px 28px; border-bottom:1px solid #1e2330; flex-wrap:wrap; }
+.stat-card { background:#111520; border:1px solid #1e2330; border-radius:6px; padding:7px 16px; min-width:110px; }
+.stat-lbl { font-size:10px; color:#4a5168; text-transform:uppercase; }
+.stat-val { font-size:16px; font-weight:500; color:#e8ecf4; }
+[data-testid="stSidebar"] { background:#0a0c10 !important; border-right:1px solid #1e2330 !important; }
+</style>
+""", unsafe_allow_html=True)
+
+ASSETS = {
+    "EURUSD": {"pip": 0.0001, "base": 1.0850, "vol": 0.0003},
+    "GBPUSD": {"pip": 0.0001, "base": 1.2700, "vol": 0.0004},
+    "USDJPY": {"pip": 0.01,   "base": 149.50, "vol": 0.05},
+    "XAUUSD": {"pip": 0.1,    "base": 2020.00, "vol": 1.20},
+}
+
+def generate_mock_ticks(asset: str, n_ticks: int = 2000, seed: int = 42) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    cfg = ASSETS[asset]
+    price = cfg["base"]
+    vol = cfg["vol"]
+    prices = [price]
+    momentum = 0.0
+    for _ in range(n_ticks - 1):
+        if rng.random() < 0.015:
+            momentum = rng.choice([-1, 1]) * vol * rng.uniform(3, 8)
+        momentum *= 0.92
+        price = max(price + rng.normal(0, vol) + momentum, 1e-5)
+        prices.append(round(price, 6))
+    return np.array(prices)
+
+@dataclass
+class RenkoBrick:
+    x: int
+    open: float
+    close: float
+    direction: int
+
+class RenkoDataEngine:
+    def __init__(self, pip_size: float, box_size_pips: int) -> None:
+        self.pip_size = pip_size
+        self.box_size = round(pip_size * box_size_pips, 10)
+        self.bricks: List[RenkoBrick] = []
+        self.virtual_x = 0
+        self.renko_high, self.renko_low = None, None
+
+    def process_ticks(self, prices: np.ndarray) -> None:
+        for p in prices:
+            if self.renko_high is None:
+                self.renko_low = math.floor(p / self.box_size) * self.box_size
+                self.renko_high = self.renko_low + self.box_size
+                continue
+            while p >= self.renko_high + self.box_size:
+                self.bricks.append(RenkoBrick(self.virtual_x, self.renko_high, round(self.renko_high + self.box_size, 10), 1))
+                self.virtual_x += 1
+                self.renko_low, self.renko_high = self.renko_high, round(self.renko_high + self.box_size, 10)
+            while p <= self.renko_low - self.box_size:
+                self.bricks.append(RenkoBrick(self.virtual_x, self.renko_low, round(self.renko_low - self.box_size, 10), -1))
+                self.virtual_x += 1
+                self.renko_high, self.renko_low = self.renko_low, round(self.renko_low - self.box_size, 10)
+
+    def to_dataframe(self) -> pd.DataFrame:
+        if not self.bricks: return pd.DataFrame()
+        df = pd.DataFrame([{"x": b.x, "open": b.open, "close": b.close, "direction": b.direction} for b in self.bricks])
+        df["high"] = df[["open", "close"]].max(axis=1)
+        df["low"] = df[["open", "close"]].min(axis=1)
+        return df
+
+def main():
+    with st.sidebar:
+        st.write("### MTR SETTINGS")
+        asset = st.selectbox("Asset Pair", list(ASSETS.keys()))
+        box_size = st.number_input("Box Size (Pips)", value=10, min_value=1)
+        ticks_count = st.slider("Data Volume", 500, 4000, 2000)
+    
+    st.markdown(f'<div class="mtr-header"><div class="mtr-logo-box">M</div><div><div class="mtr-title">MTR SYSTEM</div><div class="mtr-subtitle">Pure Price Action Dashboard</div></div></div>', unsafe_allow_html=True)
+    
+    ticks = generate_mock_ticks(asset, n_ticks=ticks_count)
+    engine = RenkoDataEngine(ASSETS[asset]["pip"], box_size)
+    engine.process_ticks(ticks)
+    df = engine.to_dataframe()
+    
+    if df.empty:
+        st.warning("No bricks generated. Try lowering the box size.")
+        return
+        
+    st.markdown(f'<div class="stat-row"><div class="stat-card"><div class="stat-lbl">Asset</div><div class="stat-val">{asset}</div></div><div class="stat-card"><div class="stat-lbl">Total Bricks</div><div class="stat-val">{len(df)}</div></div><div class="stat-card"><div class="stat-lbl">Current Close</div><div class="stat-val">{df["close"].iloc[-1]:.5f}</div></div></div>', unsafe_allow_html=True)
+    
+    fig = go.Figure()
+    for _, row in df.iterrows():
+        color = "#00c896" if row["direction"] == 1 else "#ff4d6d"
+        fig.add_shape(type="rect", x0=row["x"]-0.4, x1=row["x"]+0.4, y0=row["low"], y1=row["high"], fillcolor=color, line=dict(width=0))
+    
+    fig.update_layout(paper_bgcolor="#0d0f14", plot_bgcolor="#0f1118", margin=dict(l=10, r=50, t=20, b=20), xaxis=dict(gridcolor="#1a1e2a"), yaxis=dict(gridcolor="#1a1e2a", side="right"))
+    st.plotly_chart(fig, use_container_width=True)
+
+if __name__ == "__main__":
+    main()
 
